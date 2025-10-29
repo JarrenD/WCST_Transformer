@@ -1,1 +1,11 @@
 aaenv
+__pycache__/
+*.pyc
+*.pt
+*.png
+*.pdf
+runs/
+.vscode/
+.DS_Store
+.venv/
+env/
