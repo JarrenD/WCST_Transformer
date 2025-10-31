@@ -1,6 +1,6 @@
 WCST Transformer: Context Switching & Supervision Experiments
 
-This repository implements a Transformer-based model for a synthetic Wisconsin Card Sorting Test (WCST) sequence task.
+This project implements a Transformer-based model for a synthetic Wisconsin Card Sorting Test (WCST) sequence task.
 The goal is to explore how context switching, supervision granularity, and model capacity affect generalization in rule-changing environments.
 
 Required Python Packages:
