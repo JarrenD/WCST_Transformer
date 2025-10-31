@@ -9,6 +9,19 @@ from tqdm import tqdm
 from datetime import datetime
 from pathlib import Path
 import csv
+import matplotlib.pyplot as plt
+import numpy as np
+
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--switch", type=int, default=None, help="switch_period for training. Use None for no switching.")
+parser.add_argument("--dmodel", type=int, default=128, help="Transformer hidden size")
+parser.add_argument("--heads", type=int, default=4, help="Number of attention heads")
+parser.add_argument("--seed", type=int, default=42, help="Random seed")
+args = parser.parse_args()
+
+torch.manual_seed(args.seed); np.random.seed(args.seed)
+assert args.dmodel % args.heads == 0, "dmodel must be divisible by heads"
 
 PAD_ID = 70
 SEP_ID = 68
@@ -17,6 +30,33 @@ C1,C2,C3,C4 = 64,65,66,67
 def current_lr(optimizer):
     for g in optimizer.param_groups:
         return g.get('lr', None)
+    
+def save_confusion_png(cm, out_path, normalize=True, title="Confusion Matrix"):
+    cm = np.array(cm, dtype=float)
+    labels = ["C1", "C2", "C3", "C4"]
+
+    if normalize:
+        row_sums = cm.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1
+        cm = cm / row_sums
+
+    plt.figure(figsize=(5, 4))
+    im = plt.imshow(cm, interpolation="nearest")
+    plt.colorbar(im, fraction=0.046, pad=0.04)
+    plt.xticks(range(4), labels)
+    plt.yticks(range(4), labels)
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.title(title)
+
+    for i in range(4):
+        for j in range(4):
+            txt = f"{cm[i,j]*100:.1f}%" if normalize else f"{int(cm[i,j])}"
+            plt.text(j, i, txt, ha="center", va="center")
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close()
 
 # ============================================================================
 # TRANSFORMER COMPONENTS
@@ -251,7 +291,6 @@ def trainEpoch(model, dataloader, optimizer, device, maxGradNorm=1.0, warmup_ste
         # clip
         torch.nn.utils.clip_grad_norm_(model.parameters(), maxGradNorm)
 
-        # warmup (linear)
         global_step += 1
         if global_step <= warmup_steps:
             warm_lr = base_lr * (global_step / float(warmup_steps))
@@ -327,12 +366,10 @@ class RunLogger:
         with open(self.dir / "epoch_log.jsonl", "a") as f:
             f.write(json.dumps(rec) + "\n")
 
-        # also keep a compact history for plotting later
         self.history["train"].append({"epoch": epoch, "loss": float(train_loss), "acc": float(train_acc)})
         self.history["val"].append({"epoch": epoch, "loss": float(val_loss), "acc": float(val_acc)})
 
     def finalize(self, test_loss, test_acc, label_counts, confusion_matrix):
-        # write final metrics
         final = {
             "test_loss": float(test_loss),
             "test_acc": float(test_acc),
@@ -409,32 +446,33 @@ def main():
     valGen = wcst_val.gen_batch()
     testGen = wcst_test.gen_batch()
 
-    trainDataset = WCSTDataset(wcst_train, trainGen, numBatches=2000, switch_period = None)
-    valDataset = WCSTDataset(wcst_val, valGen, numBatches=300)   
-    testDataset = WCSTDataset(wcst_test, testGen, numBatches=300)    
+    trainDataset = WCSTDataset(wcst_train, trainGen, numBatches=2000, switch_period = switch_period)
+    valDataset = WCSTDataset(wcst_val, valGen, numBatches=300)     
+    testDataset = WCSTDataset(wcst_test, testGen, numBatches=300) 
 
     trainLoader = DataLoader(trainDataset, batch_size=32, shuffle=True, collate_fn=collateFn)
     valLoader = DataLoader(valDataset, batch_size=32, shuffle=False, collate_fn=collateFn)
     testLoader = DataLoader(testDataset, batch_size=32, shuffle=False, collate_fn=collateFn)
 
-    switch_period = None
+    switch_period = args.switch
     numEpochs = 10
     config = {
-        "seed": 42,
+        "seed": args.seed,
         "device": str(device),
         "batch_size": batch_size,
         "numEpochs": numEpochs,
-        "model": {"vocabSize": 71, "dModel": 128, "numHeads": 4, "numLayers": 4, "dFF": 512, "dropout": 0.1},
+        "model": {"vocabSize": 71, "dModel": args.dmodel, "numHeads": args.heads, "numLayers": 4, "dFF": 512, "dropout": 0.1},
         "optimizer": {"type": "AdamW", "lr": 3e-4, "betas": [0.9, 0.95], "weight_decay": 0.1},
         "loss": {"type": "CrossEntropy", "ignore_index": -100, "label_smoothing": 0.05},
         "data": {"switch_period": switch_period, "train_batches": 2000, "val_batches": 300, "test_batches": 300},
         "pad_id": PAD_ID, "sep_id": SEP_ID, "class_ids": [C1, C2, C3, C4]
     }
-    tag = f"switch_{'none' if switch_period is None else switch_period}-ep{numEpochs}"
+    tag = f"switch_{'none' if switch_period is None else switch_period}-d{args.dmodel}-h{args.heads}-ep{numEpochs}-seed{args.seed}"
     logger = RunLogger(tag, config)
 
+
     print("Initializing model...")
-    model = WCSTTransformer(vocabSize=71, dModel=128, numHeads=4, numLayers=4, dFF=512, dropout=0.1).to(device)
+    model = WCSTTransformer(vocabSize=71, dModel=args.dmodel, numHeads=args.head, numLayers=4, dFF=512, dropout=0.1).to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), weight_decay=0.1)
@@ -465,10 +503,9 @@ def main():
     global_step = 0
 
     for epoch in range(numEpochs):
-        # Rebuild train dataset each epoch (new rule draws, new samples)
         wcst_train = WCST(batch_size=batch_size)
         trainGen   = wcst_train.gen_batch()
-        trainDataset = WCSTDataset(wcst_train, trainGen, numBatches=2000, switch_period=None)
+        trainDataset = WCSTDataset(wcst_train, trainGen, numBatches=2000, switch_period=64)
         trainLoader  = DataLoader(trainDataset, batch_size=32, shuffle=True, collate_fn=collateFn)
 
         trainLoss, trainAcc, global_step = trainEpoch(
@@ -489,7 +526,7 @@ def main():
         if valLoss < bestValLoss - 1e-4:
             bestValLoss = valLoss
             bad = 0
-            torch.save(model.state_dict(), 'model1.pt')
+            torch.save(model.state_dict(), 'model2.pt')
         else:
             bad += 1
             if bad >= patience:
@@ -505,7 +542,7 @@ def main():
             f"Train Loss: {trainLoss:.4f} | Train Acc: {trainAcc:.4f} | "
             f"Val Loss: {valLoss:.4f} | Val Acc: {valAcc:.4f}")
 
-    model.load_state_dict(torch.load('model1.pt'))
+    model.load_state_dict(torch.load('model2.pt'))
     testLoss, testAcc = evaluate(model, testLoader, device)
     print(f"\nTest Loss: {testLoss:.4f} | Test Acc: {testAcc:.4f}")
 
@@ -513,9 +550,23 @@ def main():
     cm = confusion_matrix_4way(model, testLoader, device)
 
     # finalize logs
-    logger.finalize(testLoss, testAcc, cnt, cm)
-    logger.save_model('model1.pt')
-    logger.append_global_csv(tag, testLoss, testAcc)
+    logger.finalize(testLoss, testAcc, cnt, cm)  # 'cnt' is your label counts dict
+
+    print("\nConfusion matrix (rows=true C1..C4, cols=pred C1..C4):")
+    for row in cm:
+        print(row)
+
+    # also save a CSV for quick eyeballing
+    import csv
+    with open(logger.dir / "confusion.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["", "pred_C1", "pred_C2", "pred_C3", "pred_C4"])
+        for i, row in enumerate(cm, start=1):
+            w.writerow([f"true_C{i}"] + row)
+        logger.save_model('model2.pt')
+        logger.append_global_csv(tag, testLoss, testAcc)
+        save_confusion_png(cm, logger.dir / "confusion.png", normalize=True,
+                   title=f"Confusion (rows=true, cols=pred) — {tag}")
 
     # record where the dataset switches happened
     history["switch_points"] = list(range(64, 10000, 64))
