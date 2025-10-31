@@ -14,9 +14,9 @@ import numpy as np
 
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("--switch", type=int, default=None, help="switch_period for training (e.g., 16/32/64/128). Use None for no switching.")
-parser.add_argument("--dmodel", type=int, default=128, help="Transformer hidden size (e.g., 96/128/192)")
-parser.add_argument("--heads", type=int, default=4, help="Number of attention heads (must divide dmodel)")
+parser.add_argument("--switch", type=int, default=None, help="switch_period for training. Use None for no switching.")
+parser.add_argument("--dmodel", type=int, default=128, help="Transformer hidden size")
+parser.add_argument("--heads", type=int, default=4, help="Number of attention heads")
 parser.add_argument("--seed", type=int, default=42, help="Random seed")
 args = parser.parse_args()
 
